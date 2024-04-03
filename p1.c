@@ -36,8 +36,20 @@ void afisare(const char *director, FILE *output_file) {
     closedir(dir);
 }
 
-void snapshot(const char *director) {
-    FILE *snap = fopen("current_snapshot.txt", "w");
+char snapshot_initial(const char *director) {
+    FILE *snap = fopen("snapshot_initial.txt", "w");
+    if (snap == NULL) {
+        printf("Eroare creare snap!");
+        exit(EXIT_FAILURE);
+    }
+
+    afisare(director, snap);
+
+    fclose(snap);
+}
+
+void snapshot_curent(const char *director) {
+    FILE *snap = fopen("snapshot_curent.txt", "w");
     if (snap == NULL) {
         printf("Eroare creare snap!");
         exit(EXIT_FAILURE);
@@ -65,8 +77,12 @@ int main(int argc, char *argv[]) {
 
     const char *directory = argv[1];
     //const char *previous_snapshot = argv[3];
-
-    snapshot(directory);
+    const char *snaps;
+    if(snaps == NULL){
+        snaps = snapshot_initial(directory);
+        return snaps;
+    }
+    snapshot_curent(directory);
     //compare(snapshot_file, previous_snapshot);
 
     return EXIT_SUCCESS;
