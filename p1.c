@@ -13,7 +13,7 @@ void afisare(const char *director, FILE *output_file) {
     char file_path[MAX_PATH_LEN];
 
     if (!(dir = opendir(director))) {
-        perror("Eoare deschidere director!");
+        printf("Eoare deschidere director!");
         exit(EXIT_FAILURE);
     }
 
@@ -36,10 +36,10 @@ void afisare(const char *director, FILE *output_file) {
     closedir(dir);
 }
 
-void snapshot(const char *director, const char *snapshot_file) {
-    FILE *snap = fopen(snapshot_file, "w");
+void snapshot(const char *director) {
+    FILE *snap = fopen("current_snapshot.txt", "w");
     if (snap == NULL) {
-        perror("Eroare creare snap!");
+        printf("Eroare creare snap!");
         exit(EXIT_FAILURE);
     }
 
@@ -48,16 +48,26 @@ void snapshot(const char *director, const char *snapshot_file) {
     fclose(snap);
 }
 
+void compare(const char *current_snapshot, const char *previous_snapshot){
+    FILE *snaps = fopen(previous_snapshot, "r");
+    if(snaps == NULL){
+        printf("Nu exista snapshot anterior!");
+        exit(EXIT_FAILURE);
+    }
+
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <directory> <snapshot_file>\n", argv[0]);
+    if (argc != 2) {
+        printf("Usage: %s <directory>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     const char *directory = argv[1];
-    const char *snapshot_file = argv[2];
+    //const char *previous_snapshot = argv[3];
 
-    snapshot(directory, snapshot_file);
+    snapshot(directory);
+    //compare(snapshot_file, previous_snapshot);
 
     return EXIT_SUCCESS;
 }
