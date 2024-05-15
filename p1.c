@@ -1,226 +1,358 @@
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <dirent.h>
-#include <unistd.h>
+#include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
+#include <unistd.h>
 #include <sys/wait.h>
-#include <libgen.h>
-#include <errno.h>
-#include <fcntl.h>
 
-#define MAX_PATH_LEN 1024
+#define MAX_DIRECTORIES 10
 
-int cuvant_cheie(const char *linie) 
+struct Metadata
 {
-    const char *cuvinte_cheie[] = {"corrupted", "dangerous", "risk", "attack", "malware", "malicious"};
-    const int num_cuvinte_cheie = sizeof(cuvinte_cheie) / sizeof(cuvinte_cheie[0]);
-    for (int i = 0; i < num_cuvinte_cheie; i++) 
-    {
-        if (strstr(linie, cuvinte_cheie[i]) != NULL)
-            return 1;
-    }
-    return 0;
-}
+    char name[256];
+    time_t last_modified;
+    mode_t mode;
+    off_t size;
+    ino_t inode;
+    int is_snapshot; // fisier/director daca este snapshot
+    int is_directory; // check daca este director
+};
 
-int non_ascii(const char *linie) 
+// Functie pentru obtinerea metadatelor unui fisier sau director
+struct Metadata get_metadata(const char *path)
 {
-    while (*linie) 
+    struct Metadata meta;
+    struct stat file_stat;
+
+    if (stat(path, &file_stat) == -1)
     {
-        if (!isascii(*linie))
-            return 1;
-        linie++;
-    }
-    return 0;
-}
-
-int mutare_fisier(const char *cale_fisier, const char *dir_destinatie) 
-{
-    char cale_destinatie[MAX_PATH_LEN];
-    snprintf(cale_destinatie, sizeof(cale_destinatie), "%s/%s", dir_destinatie, basename((char *)cale_fisier));
-    if (rename(cale_fisier, cale_destinatie) == 0) 
-    {
-        printf("Fisierul %s a fost mutat in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 1;
-    } 
-    else 
-    {
-        perror("rename");
-        printf("Esec la mutarea fisierului %s in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 0;
-    }
-}
-
-int analizare_fisier(const char *cale_fisier, const char *dir_izolat, int pipe_fd) 
-{
-    FILE *fisier = fopen(cale_fisier, "r");
-    if (fisier == NULL) 
-    {
-        perror("fopen");
-        return 0;
-    }
-
-    char linie[1024];
-    int numar_linie = 0;
-    int cuvant_cheie_gasit = 0;
-    int nonascii_gasit = 0;
-
-    while (fgets(linie, sizeof(linie), fisier) != NULL) 
-    {
-        numar_linie++;
-        if (!cuvant_cheie_gasit && cuvant_cheie(linie)) 
-        {
-            printf("Fisierul %s contine un cuvant-cheie la linia %d.\n", cale_fisier, numar_linie);
-            cuvant_cheie_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
-        }
-        if (!nonascii_gasit && non_ascii(linie)) 
-        {
-            printf("Fisierul %s contine caractere non-ASCII la linia %d.\n", cale_fisier, numar_linie);
-            nonascii_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
-        }
-    }
-
-    fclose(fisier);
-
-    write(pipe_fd, "S", 1);
-
-    return 0;
-}
-
-void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *dir_izolat, int pipe_fd) 
-{
-    DIR *dir;
-    struct dirent *intrare;
-
-    dir = opendir(cale_dir);
-    if (dir == NULL) 
-    {
-        perror("opendir");
+        perror("stat");
         exit(EXIT_FAILURE);
     }
 
-    while ((intrare = readdir(dir)) != NULL) 
+    strncpy(meta.name, path, 255);
+    meta.name[255] = '\0';
+    meta.last_modified = file_stat.st_mtime;
+    meta.mode = file_stat.st_mode;
+    meta.size = file_stat.st_size;
+    meta.inode = file_stat.st_ino;
+    meta.is_snapshot = 0;
+    meta.is_directory = S_ISDIR(file_stat.st_mode);  // check daca este director
+
+    return meta;
+}
+
+// Functie pentru crearea unui snapshot intr-un proces copil
+void creare_snapshot_copil(const char *dir, const char *snapshot_path)
+{
+    FILE *snapshot_file = fopen(snapshot_path, "w");
+    if (snapshot_file == NULL)
+    {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    DIR *dir;
+    struct dirent *intrare;
+    dir = opendir(dir);
+    if (dir == NULL)
+    {
+        exit(EXIT_FAILURE);
+    }
+
+    while ((intrare = readdir(dir)) != NULL)
     {
         if (strcmp(intrare->d_name, ".") == 0 || strcmp(intrare->d_name, "..") == 0)
-            continue;
-
-        char cale_fisier[MAX_PATH_LEN];
-        snprintf(cale_fisier, sizeof(cale_fisier), "%s/%s", cale_dir, intrare->d_name);
-
-        struct stat stat_fisier;
-        if (stat(cale_fisier, &stat_fisier) == -1) 
         {
-            perror("stat");
-            continue;
+            continue;  // Se ignora "." si ".."
         }
 
-        if (S_ISDIR(stat_fisier.st_mode)) 
-        {
-            verificare_dir(cale_fisier, dir_iesire, dir_izolat, pipe_fd);
-        } 
-        else 
-        {
-            if (!(stat_fisier.st_mode & S_IRUSR) || !(stat_fisier.st_mode & S_IWUSR) || !(stat_fisier.st_mode & S_IXUSR) ||
-                !(stat_fisier.st_mode & S_IRGRP) || !(stat_fisier.st_mode & S_IWGRP) || !(stat_fisier.st_mode & S_IXGRP) ||
-                !(stat_fisier.st_mode & S_IROTH) || !(stat_fisier.st_mode & S_IWOTH) || !(stat_fisier.st_mode & S_IXOTH)) 
-                {
-                printf("Fisierul %s are permisiuni lipsa: ", cale_fisier);
-                if (!(stat_fisier.st_mode & S_IRUSR)) printf("Citire utilizator ");
-                if (!(stat_fisier.st_mode & S_IWUSR)) printf("Scriere utilizator ");
-                if (!(stat_fisier.st_mode & S_IXUSR)) printf("Executie utilizator ");
-                if (!(stat_fisier.st_mode & S_IRGRP)) printf("Citire grup ");
-                if (!(stat_fisier.st_mode & S_IWGRP)) printf("Scriere grup ");
-                if (!(stat_fisier.st_mode & S_IXGRP)) printf("Executie grup ");
-                if (!(stat_fisier.st_mode & S_IROTH)) printf("Citire altii ");
-                if (!(stat_fisier.st_mode & S_IWOTH)) printf("Scriere altii ");
-                if (!(stat_fisier.st_mode & S_IXOTH)) printf("Executie altii");
-                printf("\n");
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir, intrare->d_name);
 
-                pid_t pid = fork();
-                if (pid == -1) 
-                {
-                    perror("fork");
-                    continue;
-                } else if (pid == 0) 
-                {
-                    int rezultat = analizare_fisier(cale_fisier, dir_izolat, pipe_fd);
-                    exit(rezultat);
-                } 
-                else 
-                {
-                    int status;
-                    wait(&status);
-                    if (WIFEXITED(status)) 
-                    {
-                        if (WEXITSTATUS(status) == 1) 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 1 fisier potential periculos.\n", pid);
-                        } 
-                        else 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 0 fisiere potential periculoase.\n", pid);
-                        }
-                    } 
-                    else 
-                    {
-                        printf("Procesul copil a fost terminat cu PID-ul %d si a intampinat o eroare.\n", pid);
-                    }
-                }
-            }
+        struct Metadata meta = get_metadata(full_path);
+        
+        // Marcajul fisierelor/directoarelor snapshot
+        if (strcmp(intrare->d_name, "snapshot_anterior.txt") == 0 || strcmp(intrare->d_name, "snapshot_curent.txt") == 0)
+        {
+            meta.is_snapshot = 1;
+        }
+        
+        // Scriere in snapshot
+        fprintf(snapshot_file, "%s %ld %o %lld %lu %d %d\n", meta.name, meta.last_modified, meta.mode, meta.size, meta.inode, meta.is_snapshot, meta.is_directory);
+        
+        // Daca este director, apelam recursiv functia pentru a crea snapshot-ul directorului
+        if (meta.is_directory)
+        {
+            creare_snapshot_copil(full_path, snapshot_path);
         }
     }
 
     closedir(dir);
+    fclose(snapshot_file);
 }
 
-int main(int argc, char *argv[]) 
+// Functie pentru crearea unui snapshot in procesul parinte
+void creare_snapshot_parinte(const char *dir, const char *output_directory, pid_t child_pid)
 {
-    if (argc < 5 || strcmp(argv[1], "-o") != 0 || strcmp(argv[3], "-s") != 0) 
+    int status;
+    waitpid(child_pid, &status, 0);  // Asteapta terminarea procesului copil
+
+    if (WIFEXITED(status))
     {
-        printf("Utilizare: %s -o director_iesire -s director_izolare dir1 dir2 dir3\n", argv[0]);
-        exit(EXIT_FAILURE);
+        printf("Snapshot pentru %s creat cu succes.\n", dir);
+        printf("Proces copil terminat cu PID %d si exit code %d.\n", child_pid, WEXITSTATUS(status));
+    }
+    else
+    {
+        printf("Eroare: Procesul copil cu PID %d a fost oprit.\n", child_pid);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc < 4 || argc > MAX_DIRECTORIES + 2)
+    {
+        printf("Usage: %s -o <director_iesire> <director1> <director2> ... (maxim 10 directoare)\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
-    const char *dir_iesire = argv[2];
-    const char *dir_izolat = argv[4];
+    char *output_directory;
+    char *directories[MAX_DIRECTORIES];
+    int num_directories = argc - 3;
+    int dir_index = 0;
 
-    mkdir(dir_izolat, 0700);
-
-    int pipe_fd[2];
-    if (pipe(pipe_fd) == -1) 
+    for (int i = 1; i < argc; i++)
     {
-        perror("pipe");
-        exit(EXIT_FAILURE);
-    }
-
-    int numar_fisiere_corupte_total = 0;
-
-    for (int i = 5; i < argc; i++) 
-    {
-        verificare_dir(argv[i], dir_iesire, dir_izolat, pipe_fd[1]);
-    }
-
-    close(pipe_fd[1]);
-
-    char c;
-    while (read(pipe_fd[0], &c, 1) > 0) 
-    {
-        if (c == 'C') 
+        if (strcmp(argv[i], "-o") == 0)
         {
-            numar_fisiere_corupte_total++;
+            if (i + 1 >= argc)
+            {
+                printf("Eroare: Argumentul '-o' trebuie sa fie urmat de un director de iesire.\n");
+                return EXIT_FAILURE;
+            }
+            output_directory = argv[++i];
+        }
+        else
+        {
+            directories[dir_index++] = argv[i];
         }
     }
 
-    close(pipe_fd[0]);
+    if (num_directories > MAX_DIRECTORIES)
+    {
+        printf("Eroare: Numarul maxim de directoare: %d.\n", MAX_DIRECTORIES);
+        return EXIT_FAILURE;
+    }
 
-    printf("Total fisiere corupte gasite: %d\n", numar_fisiere_corupte_total);
+    for (int i = 0; i < num_directories; i++)
+    {
+        pid_t pid = fork();
+        if (pid == -1)
+        {
+            perror("fork");
+            return EXIT_FAILURE;
+        }
+        else if (pid == 0)  // Proces copil
+        {
+            char snapshot_dir[256];
+            snprintf(snapshot_dir, sizeof(snapshot_dir), "%s/%s_snapshot", output_directory, directories[i]);
+            char current_snapshot_path[256];
+            snprintf(current_snapshot_path, sizeof(current_snapshot_path), "%s/snapshot_curent.txt", snapshot_dir);
+            
+            // Creare director pentru snapshot, daca nu exista
+            mkdir(snapshot_dir, 0777);
 
-    return 0;
+            // Actualizare snapshot pentru director
+            creare_snapshot_copil(directories[i], current_snapshot_path);
+            exit(EXIT_SUCCESS);  // Termina procesul copil
+        }
+        else  // Proces parinte
+        {
+            creare_snapshot_parinte(directories[i], output_directory, pid);
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#define MAX_DIRECTORIES 10
+
+struct Metadata
+{
+    char name[256];
+    time_t last_modified;
+    mode_t mode;
+    off_t size;
+    ino_t inode;
+    int is_snapshot; // fisier/director daca este snapshot
+    int is_directory; // check daca este director
+};
+
+// Functie pentru obtinerea metadatelor unui fisier sau director
+struct Metadata get_metadata(const char *path)
+{
+    struct Metadata meta;
+    struct stat file_stat;
+
+    if (stat(path, &file_stat) == -1)
+    {
+        perror("stat");
+        exit(EXIT_FAILURE);
+    }
+
+    strncpy(meta.name, path, 255);
+    meta.name[255] = '\0';
+    meta.last_modified = file_stat.st_mtime;
+    meta.mode = file_stat.st_mode;
+    meta.size = file_stat.st_size;
+    meta.inode = file_stat.st_ino;
+    meta.is_snapshot = 0;
+    meta.is_directory = S_ISDIR(file_stat.st_mode);  // check daca este director
+
+    return meta;
+}
+
+// Functie pentru crearea unui snapshot intr-un proces copil
+void creare_snapshot_copil(const char *dir, const char *snapshot_path)
+{
+    FILE *snapshot_file = fopen(snapshot_path, "w");
+    if (snapshot_file == NULL)
+    {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    DIR *dir;
+    struct dirent *intrare;
+    dir = opendir(dir);
+    if (dir == NULL)
+    {
+        exit(EXIT_FAILURE);
+    }
+
+    while ((intrare = readdir(dir)) != NULL)
+    {
+        if (strcmp(intrare->d_name, ".") == 0 || strcmp(intrare->d_name, "..") == 0)
+        {
+            continue;  // Se ignora "." si ".."
+        }
+
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir, intrare->d_name);
+
+        struct Metadata meta = get_metadata(full_path);
+        
+        // Marcajul fisierelor/directoarelor snapshot
+        if (strcmp(intrare->d_name, "snapshot_anterior.txt") == 0 || strcmp(intrare->d_name, "snapshot_curent.txt") == 0)
+        {
+            meta.is_snapshot = 1;
+        }
+        
+        // Scriere in snapshot
+        fprintf(snapshot_file, "%s %ld %o %lld %lu %d %d\n", meta.name, meta.last_modified, meta.mode, meta.size, meta.inode, meta.is_snapshot, meta.is_directory);
+        
+        // Daca este director, apelam recursiv functia pentru a crea snapshot-ul directorului
+        if (meta.is_directory)
+        {
+            creare_snapshot_copil(full_path, snapshot_path);
+        }
+    }
+
+    closedir(dir);
+    fclose(snapshot_file);
+}
+
+// Functie pentru crearea unui snapshot in procesul parinte
+void creare_snapshot_parinte(const char *dir, const char *output_directory, pid_t child_pid)
+{
+    int status;
+    waitpid(child_pid, &status, 0);  // Asteapta terminarea procesului copil
+
+    if (WIFEXITED(status))
+    {
+        printf("Snapshot pentru %s creat cu succes.\n", dir);
+        printf("Proces copil terminat cu PID %d si exit code %d.\n", child_pid, WEXITSTATUS(status));
+    }
+    else
+    {
+        printf("Eroare: Procesul copil cu PID %d a fost oprit.\n", child_pid);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc < 4 || argc > MAX_DIRECTORIES + 2)
+    {
+        printf("Usage: %s -o <director_iesire> <director1> <director2> ... (maxim 10 directoare)\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    char *output_directory;
+    char *directories[MAX_DIRECTORIES];
+    int num_directories = argc - 3;
+    int dir_index = 0;
+
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-o") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                printf("Eroare: Argumentul '-o' trebuie sa fie urmat de un director de iesire.\n");
+                return EXIT_FAILURE;
+            }
+            output_directory = argv[++i];
+        }
+        else
+        {
+            directories[dir_index++] = argv[i];
+        }
+    }
+
+    if (num_directories > MAX_DIRECTORIES)
+    {
+        printf("Eroare: Numarul maxim de directoare: %d.\n", MAX_DIRECTORIES);
+        return EXIT_FAILURE;
+    }
+
+    for (int i = 0; i < num_directories; i++)
+    {
+        pid_t pid = fork();
+        if (pid == -1)
+        {
+            perror("fork");
+            return EXIT_FAILURE;
+        }
+        else if (pid == 0)  // Proces copil
+        {
+            char snapshot_dir[256];
+            snprintf(snapshot_dir, sizeof(snapshot_dir), "%s/%s_snapshot", output_directory, directories[i]);
+            char current_snapshot_path[256];
+            snprintf(current_snapshot_path, sizeof(current_snapshot_path), "%s/snapshot_curent.txt", snapshot_dir);
+            
+            // Creare director pentru snapshot, daca nu exista
+            mkdir(snapshot_dir, 0777);
+
+            // Actualizare snapshot pentru director
+            creare_snapshot_copil(directories[i], current_snapshot_path);
+            exit(EXIT_SUCCESS);  // Termina procesul copil
+        }
+        else  // Proces parinte
+        {
+            creare_snapshot_parinte(directories[i], output_directory, pid);
+        }
+    }
+
+    return EXIT_SUCCESS;
 }
