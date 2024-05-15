@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,13 +13,13 @@
 
 #define MAX_PATH_LEN 1024
 
-int cuvant_cheie(const char *linie) 
-{
-    const char *cuvinte_cheie[] = {"corrupted", "dangerous", "risk", "attack", "malware", "malicious"};
-    const int num_cuvinte_cheie = sizeof(cuvinte_cheie) / sizeof(cuvinte_cheie[0]);
+int cuvant_cheie(const char *linie)
+ {
+    const char *cuvant_cheie[] = {"corrupted", "dangerous", "risk", "attack", "malware", "malicious"};
+    const int num_cuvinte_cheie = sizeof(cuvant_cheie) / sizeof(cuvant_cheie[0]);
     for (int i = 0; i < num_cuvinte_cheie; i++) 
     {
-        if (strstr(linie, cuvinte_cheie[i]) != NULL)
+        if (strstr(linie, cuvant_cheie[i]) != NULL)
             return 1;
     }
     return 0;
@@ -35,30 +36,28 @@ int non_ascii(const char *linie)
     return 0;
 }
 
-int mutare_fisier(const char *cale_fisier, const char *dir_destinatie) 
+void mutare_fisier(const char *cale_fisier, const char *target_dir) 
 {
     char cale_destinatie[MAX_PATH_LEN];
-    snprintf(cale_destinatie, sizeof(cale_destinatie), "%s/%s", dir_destinatie, basename((char *)cale_fisier));
+    snprintf(cale_destinatie, sizeof(cale_destinatie), "%s/%s", target_dir, basename((char *)cale_fisier));
     if (rename(cale_fisier, cale_destinatie) == 0) 
     {
-        printf("Fisierul %s a fost mutat in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 1;
+        printf("%s a fost mutat in %s.\n", cale_fisier, target_dir);
     } 
     else 
     {
         perror("rename");
-        printf("Esec la mutarea fisierului %s in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 0;
+        printf("Esec la mutarea fisierului %s in directorul %s.\n", cale_fisier, target_dir);
     }
 }
 
-int analizare_fisier(const char *cale_fisier, const char *dir_izolat, int pipe_fd) 
+void analizare_fisier(const char *cale_fisier, const char *dir_izolat) 
 {
-    FILE *fisier = fopen(cale_fisier, "r");
-    if (fisier == NULL) 
+    FILE *file = fopen(cale_fisier, "r");
+    if (file == NULL) 
     {
         perror("fopen");
-        return 0;
+        return;
     }
 
     char linie[1024];
@@ -66,35 +65,40 @@ int analizare_fisier(const char *cale_fisier, const char *dir_izolat, int pipe_f
     int cuvant_cheie_gasit = 0;
     int nonascii_gasit = 0;
 
-    while (fgets(linie, sizeof(linie), fisier) != NULL) 
+    while (fgets(linie, sizeof(linie), file) != NULL) 
     {
         numar_linie++;
         if (!cuvant_cheie_gasit && cuvant_cheie(linie)) 
         {
-            printf("Fisierul %s contine un cuvant-cheie la linia %d.\n", cale_fisier, numar_linie);
+            printf("%s contine un cuvant cheie la linia %d.\n", cale_fisier, numar_linie);
             cuvant_cheie_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
         }
         if (!nonascii_gasit && non_ascii(linie)) 
         {
-            printf("Fisierul %s contine caractere non-ASCII la linia %d.\n", cale_fisier, numar_linie);
+            printf("%s contine caractere non ascii la linia %d.\n", cale_fisier, numar_linie);
             nonascii_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
+        }
+        // se verifica doar daca unul dintre criterii este indeplinit
+        if (cuvant_cheie_gasit || nonascii_gasit) 
+        {
+            break;
         }
     }
 
-    fclose(fisier);
+    fclose(file);
 
-    write(pipe_fd, "S", 1);
-
-    return 0;
+    // daca fisierul e corupt, se muta in directorul pt fisiere corupte
+    if (cuvant_cheie_gasit || nonascii_gasit) 
+    {
+        mutare_fisier(cale_fisier, dir_izolat);
+    } 
+    else 
+    {
+        printf("%s este curat.\n", cale_fisier);
+    }
 }
 
-void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *dir_izolat, int pipe_fd) 
+void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *dir_izolat) 
 {
     DIR *dir;
     struct dirent *intrare;
@@ -102,7 +106,6 @@ void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *di
     dir = opendir(cale_dir);
     if (dir == NULL) 
     {
-        perror("opendir");
         exit(EXIT_FAILURE);
     }
 
@@ -123,55 +126,45 @@ void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *di
 
         if (S_ISDIR(stat_fisier.st_mode)) 
         {
-            verificare_dir(cale_fisier, dir_iesire, dir_izolat, pipe_fd);
+            verificare_dir(cale_fisier, dir_iesire, dir_izolat);
         } 
         else 
         {
+            // pentru permisiuniu
             if (!(stat_fisier.st_mode & S_IRUSR) || !(stat_fisier.st_mode & S_IWUSR) || !(stat_fisier.st_mode & S_IXUSR) ||
                 !(stat_fisier.st_mode & S_IRGRP) || !(stat_fisier.st_mode & S_IWGRP) || !(stat_fisier.st_mode & S_IXGRP) ||
                 !(stat_fisier.st_mode & S_IROTH) || !(stat_fisier.st_mode & S_IWOTH) || !(stat_fisier.st_mode & S_IXOTH)) 
                 {
-                printf("Fisierul %s are permisiuni lipsa: ", cale_fisier);
-                if (!(stat_fisier.st_mode & S_IRUSR)) printf("Citire utilizator ");
-                if (!(stat_fisier.st_mode & S_IWUSR)) printf("Scriere utilizator ");
-                if (!(stat_fisier.st_mode & S_IXUSR)) printf("Executie utilizator ");
-                if (!(stat_fisier.st_mode & S_IRGRP)) printf("Citire grup ");
-                if (!(stat_fisier.st_mode & S_IWGRP)) printf("Scriere grup ");
-                if (!(stat_fisier.st_mode & S_IXGRP)) printf("Executie grup ");
-                if (!(stat_fisier.st_mode & S_IROTH)) printf("Citire altii ");
-                if (!(stat_fisier.st_mode & S_IWOTH)) printf("Scriere altii ");
-                if (!(stat_fisier.st_mode & S_IXOTH)) printf("Executie altii");
+                printf("File %s has missing permissions: ", cale_fisier);
+                if (!(stat_fisier.st_mode & S_IRUSR)) printf("User Read ");
+                if (!(stat_fisier.st_mode & S_IWUSR)) printf("User Write ");
+                if (!(stat_fisier.st_mode & S_IXUSR)) printf("User Execute ");
+                if (!(stat_fisier.st_mode & S_IRGRP)) printf("Group Read ");
+                if (!(stat_fisier.st_mode & S_IWGRP)) printf("Group Write ");
+                if (!(stat_fisier.st_mode & S_IXGRP)) printf("Group Execute ");
+                if (!(stat_fisier.st_mode & S_IROTH)) printf("Others Read ");
+                if (!(stat_fisier.st_mode & S_IWOTH)) printf("Others Write ");
+                if (!(stat_fisier.st_mode & S_IXOTH)) printf("Others Execute");
                 printf("\n");
 
+                // proces pentru analiza fisierului
                 pid_t pid = fork();
                 if (pid == -1) 
                 {
                     perror("fork");
                     continue;
-                } else if (pid == 0) 
+                } 
+                else if (pid == 0) 
                 {
-                    int rezultat = analizare_fisier(cale_fisier, dir_izolat, pipe_fd);
-                    exit(rezultat);
+                    // procesul copil
+                    analizare_fisier(cale_fisier, dir_izolat);
+                    exit(EXIT_SUCCESS);
                 } 
                 else 
                 {
+                    // procesul parinte
                     int status;
-                    wait(&status);
-                    if (WIFEXITED(status)) 
-                    {
-                        if (WEXITSTATUS(status) == 1) 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 1 fisier potential periculos.\n", pid);
-                        } 
-                        else 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 0 fisiere potential periculoase.\n", pid);
-                        }
-                    } 
-                    else 
-                    {
-                        printf("Procesul copil a fost terminat cu PID-ul %d si a intampinat o eroare.\n", pid);
-                    }
+                    wait(&status); //asteapta dupa copil
                 }
             }
         }
@@ -184,43 +177,21 @@ int main(int argc, char *argv[])
 {
     if (argc < 5 || strcmp(argv[1], "-o") != 0 || strcmp(argv[3], "-s") != 0) 
     {
-        printf("Utilizare: %s -o director_iesire -s director_izolare dir1 dir2 dir3\n", argv[0]);
+        printf("Usage: %s -o dir_iesire -s spatiu_dir_izolat dir1 dir2 dir3\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
     const char *dir_iesire = argv[2];
     const char *dir_izolat = argv[4];
 
+    // se creeaza directorul pt fisiere izolate
     mkdir(dir_izolat, 0700);
 
-    int pipe_fd[2];
-    if (pipe(pipe_fd) == -1) 
-    {
-        perror("pipe");
-        exit(EXIT_FAILURE);
-    }
-
-    int numar_fisiere_corupte_total = 0;
-
+    // se trece prin toate directoarele, prin toate subdirectoarele si se verifica fiecare fisier
     for (int i = 5; i < argc; i++) 
     {
-        verificare_dir(argv[i], dir_iesire, dir_izolat, pipe_fd[1]);
+        verificare_dir(argv[i], dir_iesire, dir_izolat);
     }
-
-    close(pipe_fd[1]);
-
-    char c;
-    while (read(pipe_fd[0], &c, 1) > 0) 
-    {
-        if (c == 'C') 
-        {
-            numar_fisiere_corupte_total++;
-        }
-    }
-
-    close(pipe_fd[0]);
-
-    printf("Total fisiere corupte gasite: %d\n", numar_fisiere_corupte_total);
 
     return 0;
 }
