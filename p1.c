@@ -1,226 +1,229 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <dirent.h>
-#include <unistd.h>
+#include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <libgen.h>
-#include <errno.h>
-#include <fcntl.h>
+#include <unistd.h>
 
-#define MAX_PATH_LEN 1024
-
-int cuvant_cheie(const char *linie) 
+struct Metadata
 {
-    const char *cuvinte_cheie[] = {"corrupted", "dangerous", "risk", "attack", "malware", "malicious"};
-    const int num_cuvinte_cheie = sizeof(cuvinte_cheie) / sizeof(cuvinte_cheie[0]);
-    for (int i = 0; i < num_cuvinte_cheie; i++) 
+    char name[256];
+    time_t last_modified;
+    mode_t mode;
+    off_t size;
+    ino_t inode;
+    int is_snapshot;
+};
+
+struct Metadata get_metadata(const char *path)
+{
+    struct Metadata meta;
+    struct stat file_stat;
+
+    if (stat(path, &file_stat) == -1)
     {
-        if (strstr(linie, cuvinte_cheie[i]) != NULL)
-            return 1;
+        perror("stat");
+        exit(EXIT_FAILURE);
     }
-    return 0;
+
+    strncpy(meta.name, path, 255);
+    meta.name[255] = '\0';
+    meta.last_modified = file_stat.st_mtime;
+    meta.mode = file_stat.st_mode;
+    meta.size = file_stat.st_size;
+    meta.inode = file_stat.st_ino;
+    meta.is_snapshot = 0;
+
+    return meta;
 }
 
-int non_ascii(const char *linie) 
-{
-    while (*linie) 
-    {
-        if (!isascii(*linie))
-            return 1;
-        linie++;
-    }
-    return 0;
-}
-
-int mutare_fisier(const char *cale_fisier, const char *dir_destinatie) 
-{
-    char cale_destinatie[MAX_PATH_LEN];
-    snprintf(cale_destinatie, sizeof(cale_destinatie), "%s/%s", dir_destinatie, basename((char *)cale_fisier));
-    if (rename(cale_fisier, cale_destinatie) == 0) 
-    {
-        printf("Fisierul %s a fost mutat in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 1;
-    } 
-    else 
-    {
-        perror("rename");
-        printf("Esec la mutarea fisierului %s in directorul %s.\n", cale_fisier, dir_destinatie);
-        return 0;
-    }
-}
-
-int analizare_fisier(const char *cale_fisier, const char *dir_izolat, int pipe_fd) 
-{
-    FILE *fisier = fopen(cale_fisier, "r");
-    if (fisier == NULL) 
-    {
-        perror("fopen");
-        return 0;
-    }
-
-    char linie[1024];
-    int numar_linie = 0;
-    int cuvant_cheie_gasit = 0;
-    int nonascii_gasit = 0;
-
-    while (fgets(linie, sizeof(linie), fisier) != NULL) 
-    {
-        numar_linie++;
-        if (!cuvant_cheie_gasit && cuvant_cheie(linie)) 
-        {
-            printf("Fisierul %s contine un cuvant-cheie la linia %d.\n", cale_fisier, numar_linie);
-            cuvant_cheie_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
-        }
-        if (!nonascii_gasit && non_ascii(linie)) 
-        {
-            printf("Fisierul %s contine caractere non-ASCII la linia %d.\n", cale_fisier, numar_linie);
-            nonascii_gasit = 1;
-            write(pipe_fd, "C", 1);
-            fclose(fisier);
-            return mutare_fisier(cale_fisier, dir_izolat);
-        }
-    }
-
-    fclose(fisier);
-
-    write(pipe_fd, "S", 1);
-
-    return 0;
-}
-
-void verificare_dir(const char *cale_dir, const char *dir_iesire, const char *dir_izolat, int pipe_fd) 
+void creare_snapshot(const char *directory, FILE *snapshot_file)
 {
     DIR *dir;
-    struct dirent *intrare;
-
-    dir = opendir(cale_dir);
-    if (dir == NULL) 
+    struct dirent *entry;
+    dir = opendir(directory);
+    if (dir == NULL)
     {
         perror("opendir");
         exit(EXIT_FAILURE);
     }
 
-    while ((intrare = readdir(dir)) != NULL) 
+    while ((entry = readdir(dir)) != NULL)
     {
-        if (strcmp(intrare->d_name, ".") == 0 || strcmp(intrare->d_name, "..") == 0)
-            continue;
-
-        char cale_fisier[MAX_PATH_LEN];
-        snprintf(cale_fisier, sizeof(cale_fisier), "%s/%s", cale_dir, intrare->d_name);
-
-        struct stat stat_fisier;
-        if (stat(cale_fisier, &stat_fisier) == -1) 
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
         {
-            perror("stat");
-            continue;
+            continue; // se ignora "." si ".."
         }
 
-        if (S_ISDIR(stat_fisier.st_mode)) 
-        {
-            verificare_dir(cale_fisier, dir_iesire, dir_izolat, pipe_fd);
-        } 
-        else 
-        {
-            if (!(stat_fisier.st_mode & S_IRUSR) || !(stat_fisier.st_mode & S_IWUSR) || !(stat_fisier.st_mode & S_IXUSR) ||
-                !(stat_fisier.st_mode & S_IRGRP) || !(stat_fisier.st_mode & S_IWGRP) || !(stat_fisier.st_mode & S_IXGRP) ||
-                !(stat_fisier.st_mode & S_IROTH) || !(stat_fisier.st_mode & S_IWOTH) || !(stat_fisier.st_mode & S_IXOTH)) 
-                {
-                printf("Fisierul %s are permisiuni lipsa: ", cale_fisier);
-                if (!(stat_fisier.st_mode & S_IRUSR)) printf("Citire utilizator ");
-                if (!(stat_fisier.st_mode & S_IWUSR)) printf("Scriere utilizator ");
-                if (!(stat_fisier.st_mode & S_IXUSR)) printf("Executie utilizator ");
-                if (!(stat_fisier.st_mode & S_IRGRP)) printf("Citire grup ");
-                if (!(stat_fisier.st_mode & S_IWGRP)) printf("Scriere grup ");
-                if (!(stat_fisier.st_mode & S_IXGRP)) printf("Executie grup ");
-                if (!(stat_fisier.st_mode & S_IROTH)) printf("Citire altii ");
-                if (!(stat_fisier.st_mode & S_IWOTH)) printf("Scriere altii ");
-                if (!(stat_fisier.st_mode & S_IXOTH)) printf("Executie altii");
-                printf("\n");
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", directory, entry->d_name);
 
-                pid_t pid = fork();
-                if (pid == -1) 
-                {
-                    perror("fork");
-                    continue;
-                } else if (pid == 0) 
-                {
-                    int rezultat = analizare_fisier(cale_fisier, dir_izolat, pipe_fd);
-                    exit(rezultat);
-                } 
-                else 
-                {
-                    int status;
-                    wait(&status);
-                    if (WIFEXITED(status)) 
-                    {
-                        if (WEXITSTATUS(status) == 1) 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 1 fisier potential periculos.\n", pid);
-                        } 
-                        else 
-                        {
-                            printf("Procesul copil a fost terminat cu PID-ul %d si a detectat 0 fisiere potential periculoase.\n", pid);
-                        }
-                    } 
-                    else 
-                    {
-                        printf("Procesul copil a fost terminat cu PID-ul %d si a intampinat o eroare.\n", pid);
-                    }
-                }
-            }
+        struct Metadata meta = get_metadata(full_path);
+
+        // marcajul fisierelor snapshot
+        if (strcmp(entry->d_name, "snapshot_anterior.txt") == 0 || strcmp(entry->d_name, "snapshot_curent.txt") == 0)
+        {
+            meta.is_snapshot = 1;
+        }
+
+        // scriere în snapshot
+        fprintf(snapshot_file, "%s %ld %o %lld %lu %d\n", meta.name, meta.last_modified, meta.mode, meta.size, meta.inode, meta.is_snapshot);
+
+        // if director -> recursiv
+        if (S_ISDIR(meta.mode))
+        {
+            creare_snapshot(full_path, snapshot_file);
         }
     }
 
     closedir(dir);
 }
 
-int main(int argc, char *argv[]) 
+// se compara snapshot-urile Si se afiSeaza modificarile
+void comparare(FILE *prev_snapshot, FILE *current_snapshot)
 {
-    if (argc < 5 || strcmp(argv[1], "-o") != 0 || strcmp(argv[3], "-s") != 0) 
+    struct Metadata prev_entry;
+    struct Metadata current_entry;
+    int changes_detected = 0; // Variabila pentru a verifica daca s-au detectat modificari
+    // se citesc datele din snapshot-uri Si se compara fiSierele
+    while (fscanf(current_snapshot, "%255s %ld %o %lld %lu %d\n", current_entry.name, &current_entry.last_modified, &current_entry.mode, &current_entry.size, &current_entry.inode, &current_entry.is_snapshot) != EOF)
     {
-        printf("Utilizare: %s -o director_iesire -s director_izolare dir1 dir2 dir3\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    const char *dir_iesire = argv[2];
-    const char *dir_izolat = argv[4];
-
-    mkdir(dir_izolat, 0700);
-
-    int pipe_fd[2];
-    if (pipe(pipe_fd) == -1) 
-    {
-        perror("pipe");
-        exit(EXIT_FAILURE);
-    }
-
-    int numar_fisiere_corupte_total = 0;
-
-    for (int i = 5; i < argc; i++) 
-    {
-        verificare_dir(argv[i], dir_iesire, dir_izolat, pipe_fd[1]);
-    }
-
-    close(pipe_fd[1]);
-
-    char c;
-    while (read(pipe_fd[0], &c, 1) > 0) 
-    {
-        if (c == 'C') 
+        if (current_entry.is_snapshot == 1)
         {
-            numar_fisiere_corupte_total++;
+            continue; // se ignora fiSierele snapshot
+        }
+
+        int found = 0;
+        rewind(prev_snapshot);
+        /* se repozitioneaza cursorul la inceputul fisierului anterior pentru a putea parcurge din nou fisierul de la inceput pentru a compara fiecare intrare din fisierul anterior cu
+        fiecare intrare din fisierul curent. */
+        while (fscanf(prev_snapshot, "%255s %ld %o %lld %lu %d\n", prev_entry.name, &prev_entry.last_modified, &prev_entry.mode, &prev_entry.size, &prev_entry.inode, &prev_entry.is_snapshot) != EOF)
+        {
+            if (current_entry.inode == prev_entry.inode)
+            {
+                found = 1;
+                if (strcmp(current_entry.name, prev_entry.name) != 0)
+                {
+                    printf("Redenumire: %s ->%s\n", prev_entry.name, current_entry.name);
+                    changes_detected = 1;
+                }
+
+                if (current_entry.last_modified != prev_entry.last_modified) //Adaug asta în caz ca gasim fiSierul Si are acelaSi nume, verificam data ultimei modificari sa Stim daca e modificat
+                {
+                    printf("Modificare: %s\n", current_entry.name);
+                    changes_detected = 1;
+                }
+                break;
+            }
+        }
+        if (!found)
+        {
+            printf("Adaugare: %s\n", current_entry.name);
+            changes_detected = 1;
         }
     }
 
-    close(pipe_fd[0]);
+    // verificare posibile fisiere sterse
+    rewind(prev_snapshot); // Punem cursorul la început de fisier
+    rewind(current_snapshot);
+    while (fscanf(prev_snapshot, "%255s %ld %o %lld %lu %d\n", prev_entry.name, &prev_entry.last_modified, &prev_entry.mode, &prev_entry.size, &prev_entry.inode, &prev_entry.is_snapshot) != EOF)
+    {
+        if (prev_entry.is_snapshot == 1)
+        {
+            continue; // se ignora fisierele snapshot
+        }
 
-    printf("Total fisiere corupte gasite: %d\n", numar_fisiere_corupte_total);
+        int found = 0;
+        rewind(current_snapshot);
+        while (fscanf(current_snapshot, "%255s %ld %o %lld %lu %d\n", current_entry.name, &current_entry.last_modified, &current_entry.mode, &current_entry.size, &current_entry.inode, &current_entry.is_snapshot) != EOF)
+        {
+            if (prev_entry.inode == current_entry.inode)
+            {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+        {
+            printf("Stergere: %s\n", prev_entry.name);
+            changes_detected = 1;
+        }
+    }
 
-    return 0;
+    if (!changes_detected)
+    {
+        printf("Nu s-au detectat modificari.\n");
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc != 2)
+    {
+        printf("Utilizare: %s <directory>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    char *directory = argv[1];
+
+    FILE *prev_snapshot_file = fopen("snapshot_anterior.txt", "r");
+    if (prev_snapshot_file == NULL)
+    {
+        printf("Snapshot-ul anterior nu a fost gasit. Se creeaza unul nou.\n");
+        prev_snapshot_file = fopen("snapshot_anterior.txt", "w");
+        if (prev_snapshot_file == NULL)
+        {
+            perror("fopen");
+            return EXIT_FAILURE;
+        }
+        fclose(prev_snapshot_file);
+        printf("Primul snapshot creat cu succes.\n");
+    }
+
+    FILE *current_snapshot_file = fopen("snapshot_curent.txt", "w");
+    if (current_snapshot_file == NULL)
+    {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    creare_snapshot(directory, current_snapshot_file);
+
+    fclose(current_snapshot_file);
+    printf("Snapshot creat cu succes.\n");
+
+    // se compara anteriorul cu cel curent
+    prev_snapshot_file = fopen("snapshot_anterior.txt", "r");
+    current_snapshot_file = fopen("snapshot_curent.txt", "r");
+
+    if (prev_snapshot_file == NULL || current_snapshot_file == NULL)
+    {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    comparare(prev_snapshot_file, current_snapshot_file);
+
+    fclose(prev_snapshot_file);
+    fclose(current_snapshot_file);
+
+    // se actualizeaza "snapshot_anterior.txt" prin copierea continutului din cel curent in cel anterior pentru urmatoarea rulare
+    current_snapshot_file = fopen("snapshot_curent.txt", "r");
+    prev_snapshot_file = fopen("snapshot_anterior.txt", "w");
+    if (prev_snapshot_file == NULL || current_snapshot_file == NULL)
+    {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    int c;
+    while ((c = fgetc(current_snapshot_file)) != EOF)
+    {
+        fputc(c, prev_snapshot_file);
+    }
+
+    fclose(prev_snapshot_file);
+    fclose(current_snapshot_file);
+
+    return EXIT_SUCCESS;
 }
